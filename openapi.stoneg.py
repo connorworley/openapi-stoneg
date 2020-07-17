@@ -1,176 +1,213 @@
-import yaml
+import sys
+from functools import partial
+from typing import Any, Callable, Dict, Type, TypeVar, Union
 
 import openapi_typed as oa
-from stone.backend import CodeBackend # type: ignore
-from stone.ir import data_types # type: ignore
-from stone.ir.api import ApiNamespace, ApiRoute # type: ignore
+import yaml
+from stone.backend import CodeBackend
+from stone.ir import data_types
+from stone.ir.api import ApiNamespace, ApiRoute
 
 
-def type_to_schema_declaration(
-    namespace: ApiNamespace,
-    typ: data_types.DataType,
+def _numeric_to_schema_def(
+    typ: Union[
+        data_types.Float32,
+        data_types.Float64,
+        data_types.Int32,
+        data_types.Int64,
+        data_types.UInt32,
+        data_types.UInt64,
+    ],
 ) -> oa.Schema:
-    if isinstance(typ, (data_types.Alias, data_types.Struct, data_types.Union)):
-        ref = f"#/components/schemas/{typ.name}"
-        if typ.namespace != namespace:
-            ref = f"{typ.namespace.name}.yaml{ref}"
-        return {"$ref": ref} # type: ignore
+    schema = {
+        data_types.Float32: oa.Schema(type="number", format="float"),
+        data_types.Float64: oa.Schema(type="number", format="double"),
+        data_types.Int32:   oa.Schema(type="integer", format="int32"),
+        data_types.Int64:   oa.Schema(type="integer", format="int64"),
+        data_types.UInt32:  oa.Schema(type="integer", format="uint64"),
+        data_types.UInt64:  oa.Schema(type="integer", format="uint64"),
+    }[type(typ)]
 
-    return type_to_schema_definition(namespace, typ)
+    if typ.min_value is not None:
+        schema['minimum'] = typ.min_value
+    if typ.max_value is not None:
+        schema['maximum'] = typ.max_value
 
-def type_to_schema_definition(
+    return schema
+
+
+def _list_to_schema_def(
     namespace: ApiNamespace,
-    typ: data_types.DataType,
+    typ: data_types.List,
 ) -> oa.Schema:
-    result = oa.Schema()
-    if isinstance(typ, data_types.Boolean):
-        return {
-            "type": "boolean",
-        }
-    elif isinstance(typ, data_types.Float32):
-        result = {
-            "type": "number",
-            "format": "double",
-        }
-        if typ.min_value is not None:
-            result["minimum"] = typ.min_value
-        if typ.max_value is not None:
-            result["maximum"] = typ.max_value
-        return result
-    elif isinstance(typ, data_types.Float64):
-        result = {
-            "type": "number",
-            "format": "double",
-        }
-        if typ.min_value is not None:
-            result["minimum"] = typ.min_value
-        if typ.max_value is not None:
-            result["maximum"] = typ.max_value
-        return result
-    elif isinstance(typ, data_types.Int32):
-        result = {
-            "type": "integer",
-            "format": "int32",
-        }
-        if typ.min_value is not None:
-            result["minimum"] = typ.min_value
-        if typ.max_value is not None:
-            result["maximum"] = typ.max_value
-        return result
-    elif isinstance(typ, data_types.Int64):
-        result = {
-            "type": "integer",
-            "format": "int64",
-        }
-        if typ.min_value is not None:
-            result["minimum"] = typ.min_value
-        if typ.max_value is not None:
-            result["maximum"] = typ.max_value
-        return result
-    elif isinstance(typ, data_types.UInt32):
-        result = {
-            "type": "integer",
-            "format": "uint32",
-        }
-        if typ.min_value is not None:
-            result["minimum"] = typ.min_value
-        if typ.max_value is not None:
-            result["maximum"] = typ.max_value
-        return result
-    elif isinstance(typ, data_types.UInt64):
-        result = {
-            "type": "integer",
-            "format": "uint64",
-        }
-        if typ.min_value is not None:
-            result["minimum"] = typ.min_value
-        if typ.max_value is not None:
-            result["maximum"] = typ.max_value
-        return result
-    elif isinstance(typ, data_types.List):
-        result = {
-            "type": "array",
-            "items": type_to_schema_declaration(namespace, typ.data_type),
-        }
-        if typ.min_items is not None:
-            result["minItems"] = typ.min_items
-        if typ.max_items is not None:
-            result["maxItems"] = typ.max_items
-        return result
-    elif isinstance(typ, data_types.String):
-        result = {
-            "type": "string",
-        }
-        if typ.min_length is not None:
-            result["minLength"] = typ.min_length
-        if typ.max_length is not None:
-            result["maxLength"] = typ.max_length
-        # if typ.pattern is not None:
-        #     result["pattern"] = typ.pattern
-        return result
-    elif isinstance(typ, data_types.Timestamp):
-        return {
-            "type": "string",
-        }
-    elif isinstance(typ, data_types.Void):
-        return {}
-    elif isinstance(typ, data_types.Nullable):
-        result = type_to_schema_declaration(namespace, typ.data_type)
-        result["nullable"] = True
-        return result
-    elif isinstance(typ, data_types.Struct):
-        result = {
-            "type": "object",
-            "required": [
-                field.name
-                for field in typ.fields
-                if not isinstance(field.data_type, data_types.Nullable)
-            ],
-            "properties": {
-                field.name: type_to_schema_declaration(namespace, field.data_type)
-                for field in typ.fields
+    schema = oa.Schema(
+        type="array",
+        items=type_to_schema_decl(namespace, typ.data_type),
+    )
+
+    if typ.min_items is not None:
+        schema['minItems'] = typ.min_items
+    if typ.max_items is not None:
+        schema['maxItems'] = typ.max_items
+
+    return schema
+
+
+def _string_to_schema_def(typ: data_types.String) -> oa.Schema:
+    schema = oa.Schema(type="string")
+
+    if typ.min_length is not None:
+        schema['minLength'] = typ.min_length
+    if typ.max_length is not None:
+        schema['maxLength'] = typ.max_length
+
+    return schema
+
+
+def _timestamp_to_schema_def(typ: data_types.Timestamp) -> oa.Schema:
+    print("WARNING: Timestamps are not properly supported", file=sys.stderr)
+    return oa.Schema(type="string")
+
+
+def _nullable_to_schema_def(
+    namespace: ApiNamespace,
+    typ: data_types.Nullable,
+) -> oa.Schema:
+    schema = oa.Schema(
+        allOf=[type_to_schema_decl(namespace, typ.data_type)],
+    )
+    schema['nullable'] = True
+    return schema
+
+
+def _struct_to_schema_def(
+    namespace: ApiNamespace,
+    typ: data_types.Struct,
+) -> oa.Schema:
+    schema = oa.Schema(
+        type="object",
+        properties={
+            field.name: type_to_schema_decl(namespace, field.data_type)
+            for field in typ.fields
+        },
+        required=[
+            field.name
+            for field in typ.fields
+            if not isinstance(field.data_type, data_types.Nullable)
+        ],
+    )
+    if typ.parent_type is not None:
+        schema["allOf"] = [
+            type_to_schema_decl(namespace, typ.parent_type),
+        ]
+    if typ.has_enumerated_subtypes():
+        return oa.Schema(
+            type="object",
+            properties={
+                "file": type_to_schema_decl(namespace, typ.get_enumerated_subtypes()[0].data_type),
             },
-        }
-        if typ.parent_type is not None:
-            result = {
-                "allOf": [
-                    result,
-                    type_to_schema_declaration(namespace, typ.parent_type),
+            required=["file"],
+        )
+
+        subtypes_schema = oa.Schema(
+            oa.Schema(
+                anyOf=[
+                    oa.Schema(
+                        type="object",
+                        properties={
+                            variant.name: type_to_schema_decl(namespace, variant.data_type),
+                        },
+                        required=[variant.name],
+                    )
+                    for variant in typ.get_enumerated_subtypes()
                 ],
-            }
-        return result
-    elif isinstance(typ, data_types.Union):
-        return {
-            "oneOf": [
-                {
-                    "allOf": [
-                        {
-                            "type": "object",
-                            "required": [".tag"],
-                            "properties": {
-                                ".tag": {
-                                    "type": "string",
-                                },
-                            },
-                        },
-                        type_to_schema_declaration(namespace, variant.data_type) if isinstance(variant.data_type, (data_types.Alias, data_types.Struct, data_types.Union))
-                        else {
-                            "type": "object",
-                            "required": [variant.name],
-                            "properties": {
-                                variant.name: type_to_schema_declaration(namespace, variant.data_type),
-                            }
-                        },
-                    ],
-                }
-                for variant in typ.fields
-            ],
-            "discriminator": {
-                "propertyName": ".tag",
-            },
-        }
-    raise ValueError(f"unhandled type {type(typ)}")
+            ),
+        )
 
+        schema = oa.Schema(
+            oneOf=[
+                schema,
+                subtypes_schema,
+            ],
+        )
+    return schema
+
+
+def _union_to_schema_def(
+    namespace: ApiNamespace,
+    typ: data_types.Union,
+) -> oa.Schema:
+    schema = oa.Schema(
+        oa.Schema(
+            type="object",
+            properties={
+                ".tag": oa.Schema(type="string"),
+            },
+            required=[".tag"],
+        ),
+    )
+
+    if any(not isinstance(variant.data_type, data_types.Void) for variant in typ.all_fields):
+        schema["oneOf"] = [
+            oa.Schema(
+                type="object",
+                properties={
+                    variant.name: type_to_schema_decl(namespace, variant.data_type),
+                },
+                required=[variant.name],
+            )
+            for variant in typ.all_fields
+            if not isinstance(variant.data_type, data_types.Void)
+        ]
+        schema["discriminator"] = oa.Discriminator(
+            propertyName=".tag",
+        )
+
+    return schema
+
+
+def type_to_schema_decl(
+    namespace: ApiNamespace,
+    typ: data_types.DataType,
+) -> Union[oa.Reference, oa.Schema]:
+    if isinstance(typ, data_types.UserDefined):
+        return oa.Reference({
+            "$ref": f"{typ.namespace.name}.yaml#/components/schemas/{typ.name}",
+        })
+    return type_to_schema_def(namespace, typ)
+
+
+def type_to_schema_def(
+    namespace: ApiNamespace,
+    typ: data_types.DataType,
+) -> oa.Schema:
+        if isinstance(typ, data_types.Boolean):
+            return oa.Schema(type="boolean")
+        if isinstance(
+            typ,
+            (
+                data_types.Float32, data_types.Float64,
+                data_types.Int32, data_types.Int64,
+                data_types.UInt32, data_types.UInt64,
+            ),
+        ):
+            return _numeric_to_schema_def(typ)
+        if isinstance(typ, data_types.List):
+            return _list_to_schema_def(namespace, typ)
+        if isinstance(typ, data_types.String):
+            return _string_to_schema_def(typ)
+        if isinstance(typ, data_types.Timestamp):
+            return _timestamp_to_schema_def(typ)
+        if isinstance(typ, data_types.Void):
+            return oa.Schema()
+        if isinstance(typ, data_types.Nullable):
+            return _nullable_to_schema_def(namespace, typ)
+        if isinstance(typ, data_types.Struct):
+            return _struct_to_schema_def(namespace, typ)
+        if isinstance(typ, data_types.Union):
+            return _union_to_schema_def(namespace, typ)
+
+        raise ValueError(f"Unsupported type: {type(typ)}")
 
 
 def route_to_path(
@@ -179,52 +216,40 @@ def route_to_path(
 ) -> oa.PathItem:
     return {
         "post": {
-            "description": route.doc,
-            **(
-                {
-                    "requestBody": {
-                        "required": True,
-                        "content": {
-                            "application/json": {
-                                "schema": type_to_schema_declaration(namespace, route.arg_data_type),
-                            },
-                        },
+            "description": route.doc or "",
+            **({
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": type_to_schema_decl(namespace, route.arg_data_type),
                     },
-                }
-                if not isinstance(route.arg_data_type, data_types.Void) else {}
-            ),
+                },
+            }} if route.arg_data_type is not None and not isinstance(route.arg_data_type, data_types.Void) else {}),
             "responses": {
                 "200": {
-                    **(
-                        {
-                            "content": {
-                                "application/json": {
-                                    "schema": type_to_schema_declaration(namespace, route.result_data_type),
-                                },
-                            },
-                        }
-                        if not isinstance(route.result_data_type, data_types.Void) else {}
-                    ),
+                    "description": "",
+                    "content": {
+                        "application/json": {
+                            "schema": type_to_schema_decl(namespace, route.result_data_type),
+                        },
+                    } if route.result_data_type is not None and not isinstance(route.result_data_type, data_types.Void) else {},
                 },
                 "409": {
-                    **(
-                        {
-                            "content": {
-                                "application/json": {
-                                    "schema": {
-                                        "type": "object",
-                                        "properties": {
-                                            "error": type_to_schema_declaration(namespace, route.error_data_type),
-                                            "error_summary": {
-                                                "type": "string",
-                                            },
-                                        },
+                    "description": "",
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "error": type_to_schema_decl(namespace, route.error_data_type),
+                                    "error_summary": {
+                                        "type": "string",
                                     },
                                 },
                             },
-                        }
-                        if not isinstance(route.error_data_type, data_types.Void) else {}
-                    ),
+                        },
+                    } if route.error_data_type is not None and not isinstance(route.error_data_type, data_types.Void) else {},
                 },
             },
         },
@@ -240,6 +265,11 @@ def route_name_to_path_name(namespace_name, route_name, route_version):
 
 def namespace_to_spec(namespace):
     return {
+        "openapi": "3.0.0",
+        "info": {
+            "title": namespace.name,
+            "version": "0.1.0",
+        },
         "paths": {
             route_name_to_path_name(namespace.name, route_name, route_version): route_to_path(namespace, route)
             for route_name, _routes_by_version in namespace.routes_by_name.items()
@@ -247,7 +277,7 @@ def namespace_to_spec(namespace):
         },
         "components": {
             "schemas": {
-                data_type_name: type_to_schema_definition(namespace, data_type)
+                data_type_name: type_to_schema_def(namespace, data_type)
                 for data_type_name, data_type in namespace.data_type_by_name.items()
             },
         },
@@ -291,7 +321,7 @@ class OpenApiBackend(CodeBackend):
                                     "authorizationCode": {
                                         "authorizationUrl": "https://www.dropbox.com/oauth2/authorize",
                                         "tokenUrl": "https://api.dropboxapi.com/oauth2/token",
-                                        "scopes": [],
+                                        "scopes": {},
                                     },
                                 },
                             },
